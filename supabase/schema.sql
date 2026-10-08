@@ -7,6 +7,10 @@ create table if not exists public.meal_adjustment_requests (id uuid primary key 
 create table if not exists public.shared_bills (id uuid primary key default uuid_generate_v4(), mess_id uuid references public.messes(id) on delete cascade, month date not null, maid numeric(12,2) not null default 0, electricity numeric(12,2) not null default 0, wifi numeric(12,2) not null default 0, gas numeric(12,2) not null default 0, unique(mess_id, month));
 create table if not exists public.monthly_snapshots (id uuid primary key default uuid_generate_v4(), mess_id uuid references public.messes(id) on delete cascade, month date not null, due_date date not null, total_people integer default 0, total_meals numeric(12,2) default 0, total_commodity_cost numeric(12,2) default 0, meal_rate numeric(12,2) default 0, shared_bills numeric(12,2) default 0, member_balances jsonb default '{}'::jsonb, closed_at timestamptz, unique(mess_id, month));
 create table if not exists public.mess_app_state (mess_id uuid primary key references public.messes(id) on delete cascade, state jsonb not null default '{}'::jsonb, updated_by uuid references auth.users(id), updated_at timestamptz not null default now());
+alter table public.meals add column if not exists meal_count numeric(4,2) not null default 0 check (meal_count >= 0);
+create table if not exists public.community_messages (id uuid primary key default uuid_generate_v4(), mess_id uuid not null references public.messes(id) on delete cascade, author_id uuid not null references auth.users(id) on delete cascade, body text not null check (length(trim(body)) > 0), created_at timestamptz not null default now());
+create table if not exists public.community_rules (id uuid primary key default uuid_generate_v4(), mess_id uuid not null references public.messes(id) on delete cascade, body text not null check (length(trim(body)) > 0), created_by uuid not null references auth.users(id), created_at timestamptz not null default now());
+create table if not exists public.community_settings (mess_id uuid primary key references public.messes(id) on delete cascade, pinned_message_id uuid references public.community_messages(id) on delete set null, updated_by uuid references auth.users(id), updated_at timestamptz not null default now());
 alter table public.messes enable row level security;
 alter table public.mess_members enable row level security;
 alter table public.meals enable row level security;
@@ -15,6 +19,33 @@ alter table public.monthly_snapshots enable row level security;
 alter table public.meal_adjustment_requests enable row level security;
 alter table public.shared_bills enable row level security;
 alter table public.mess_app_state enable row level security;
+alter table public.community_messages enable row level security;
+alter table public.community_rules enable row level security;
+alter table public.community_settings enable row level security;
+
+drop policy if exists "members can read their mess" on public.mess_members;
+drop policy if exists "admins manage members" on public.mess_members;
+drop policy if exists "members read meals" on public.meals;
+drop policy if exists "members write own meals" on public.meals;
+drop policy if exists "admins update meals" on public.meals;
+drop policy if exists "members read expenses" on public.expenses;
+drop policy if exists "members add expenses" on public.expenses;
+drop policy if exists "members read requests" on public.meal_adjustment_requests;
+drop policy if exists "members create requests" on public.meal_adjustment_requests;
+drop policy if exists "admins review requests" on public.meal_adjustment_requests;
+drop policy if exists "members read shared bills" on public.shared_bills;
+drop policy if exists "admins manage shared bills" on public.shared_bills;
+drop policy if exists "members read snapshots" on public.monthly_snapshots;
+drop policy if exists "admins close snapshots" on public.monthly_snapshots;
+drop policy if exists "members read app state" on public.mess_app_state;
+drop policy if exists "members insert app state" on public.mess_app_state;
+drop policy if exists "members update app state" on public.mess_app_state;
+drop policy if exists "members read community messages" on public.community_messages;
+drop policy if exists "members create community messages" on public.community_messages;
+drop policy if exists "members read community rules" on public.community_rules;
+drop policy if exists "admins manage community rules" on public.community_rules;
+drop policy if exists "members read community settings" on public.community_settings;
+drop policy if exists "admins manage community settings" on public.community_settings;
 
 -- Membership helper keeps all policies scoped to the current user's mess.
 create or replace function public.is_mess_member(target_mess uuid)
@@ -28,6 +59,7 @@ create policy "members can read their mess" on public.mess_members for select us
 create policy "admins manage members" on public.mess_members for all using (public.is_mess_admin(mess_id)) with check (public.is_mess_admin(mess_id));
 create policy "members read meals" on public.meals for select using (public.is_mess_member(mess_id));
 create policy "members write own meals" on public.meals for insert with check (public.is_mess_member(mess_id) and member_id in (select id from public.mess_members where user_id = auth.uid()));
+create policy "admins update meals" on public.meals for update using (public.is_mess_admin(mess_id)) with check (public.is_mess_admin(mess_id));
 create policy "members read expenses" on public.expenses for select using (public.is_mess_member(mess_id));
 create policy "members add expenses" on public.expenses for insert with check (public.is_mess_member(mess_id));
 create policy "members read requests" on public.meal_adjustment_requests for select using (public.is_mess_member(mess_id));
@@ -40,3 +72,9 @@ create policy "admins close snapshots" on public.monthly_snapshots for all using
 create policy "members read app state" on public.mess_app_state for select using (public.is_mess_member(mess_id));
 create policy "members insert app state" on public.mess_app_state for insert with check (public.is_mess_member(mess_id));
 create policy "members update app state" on public.mess_app_state for update using (public.is_mess_member(mess_id)) with check (public.is_mess_member(mess_id));
+create policy "members read community messages" on public.community_messages for select using (public.is_mess_member(mess_id));
+create policy "members create community messages" on public.community_messages for insert with check (public.is_mess_member(mess_id) and author_id = auth.uid());
+create policy "members read community rules" on public.community_rules for select using (public.is_mess_member(mess_id));
+create policy "admins manage community rules" on public.community_rules for all using (public.is_mess_admin(mess_id)) with check (public.is_mess_admin(mess_id));
+create policy "members read community settings" on public.community_settings for select using (public.is_mess_member(mess_id));
+create policy "admins manage community settings" on public.community_settings for all using (public.is_mess_admin(mess_id)) with check (public.is_mess_admin(mess_id));
