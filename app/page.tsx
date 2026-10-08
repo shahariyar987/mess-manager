@@ -9,6 +9,7 @@ import {
   CircleHelp, DollarSign, Download, Home, Menu, MoreHorizontal, Plus, Receipt,
   Settings, ShieldCheck, Sparkles, Utensils, Users, X,
 } from "lucide-react";
+import { cloudEnabled, messId, supabase } from "../lib/supabase";
 
 type Tab = "Overview" | "Meals" | "Expenses" | "Members" | "Admin close" | "Community" | "Settings" | "Help";
 type Expense = { item: string; category: string; by: string; date: string; amount: number; color: string };
@@ -54,28 +55,60 @@ export default function HomePage() {
   const [rules, setRules] = useState<string[]>([]);
   const [preferences, setPreferences] = useState<Preferences>(emptyState.preferences);
   const [hydrated, setHydrated] = useState(false);
+  const [cloudError, setCloudError] = useState("");
+  const [cloudSyncing, setCloudSyncing] = useState(false);
   const currentMonth = getCurrentMonth();
   useEffect(() => {
     if (tab === "Meals") setSelectedMonth(currentMonth);
   }, [tab, currentMonth]);
   useEffect(() => {
     try {
-      const saved = localStorage.getItem("messmate-state");
+      const saved = cloudEnabled ? null : localStorage.getItem("messmate-state");
       const savedAccounts = localStorage.getItem("messmate-accounts");
       if (saved) {
         const parsed = JSON.parse(saved) as StoredState;
         setExpenses(parsed.expenses || []); setRequests(parsed.requests || []); setBills(parsed.bills || emptyBills); setMembers((parsed.members || []).map(member => ({ ...member, role: isFixedAdminMember(member) ? "Admin" : "Member" }))); setMealLogs(parsed.mealLogs || {}); setMessages(parsed.messages || []); setPinnedMessageId(parsed.pinnedMessageId || null); setRules(parsed.rules || []); setPreferences(parsed.preferences || emptyState.preferences);
       }
       if (savedAccounts) setAccounts(JSON.parse(savedAccounts) as Account[]);
-      const session = localStorage.getItem("messmate-session");
+      const session = cloudEnabled ? null : localStorage.getItem("messmate-session");
       if (session) setAccount(JSON.parse(session) as Account);
     } catch { setAuthError("Saved local data could not be read. Please sign in again."); }
     finally { setHydrated(true); }
   }, []);
   useEffect(() => {
-    if (hydrated) localStorage.setItem("messmate-state", JSON.stringify({ expenses, requests, bills, members, mealLogs, messages, pinnedMessageId, rules, preferences }));
+    if (!cloudEnabled || !supabase) return;
+    const client = supabase;
+    let active = true;
+    const loadCloud = async () => {
+      setCloudSyncing(true); setCloudError("");
+      const { data: auth } = await client.auth.getUser();
+      if (!auth.user) { setHydrated(true); setCloudSyncing(false); return; }
+      const { data, error } = await client.from("mess_app_state").select("state").eq("mess_id", messId).maybeSingle();
+      if (error) setCloudError(`Cloud data could not be loaded: ${error.message}`);
+      const { data: profile } = await client.from("mess_members").select("display_name, member_code, room_rent, role").eq("mess_id", messId).eq("user_id", auth.user.id).maybeSingle();
+      if (active && data?.state) {
+        const parsed = data.state as StoredState;
+        setExpenses(parsed.expenses || []); setRequests(parsed.requests || []); setBills(parsed.bills || emptyBills); setMembers((parsed.members || []).map(member => ({ ...member, role: isFixedAdminMember(member) ? "Admin" : "Member" }))); setMealLogs(parsed.mealLogs || {}); setMessages(parsed.messages || []); setPinnedMessageId(parsed.pinnedMessageId || null); setRules(parsed.rules || []); setPreferences(parsed.preferences || emptyState.preferences);
+      }
+      if (active) { setAccount({ name: profile?.display_name || auth.user.user_metadata?.name || auth.user.email?.split("@")[0] || "Member", username: auth.user.email || "", password: "", memberId: profile?.member_code || auth.user.id, role: profile?.role === "admin" ? "admin" : "member", rent: Number(profile?.room_rent || 0) }); setHydrated(true); setCloudSyncing(false); }
+    };
+    loadCloud().catch(error => { if (active) { setCloudError(`Cloud data could not be loaded: ${error instanceof Error ? error.message : "Unknown error"}`); setHydrated(true); setCloudSyncing(false); } });
+    const listener = client.auth.onAuthStateChange(() => { loadCloud().catch(() => undefined); });
+    return () => { active = false; listener.data.subscription.unsubscribe(); };
+  }, []);
+  useEffect(() => {
+    if (hydrated && !cloudEnabled) localStorage.setItem("messmate-state", JSON.stringify({ expenses, requests, bills, members, mealLogs, messages, pinnedMessageId, rules, preferences }));
   }, [expenses, requests, bills, members, mealLogs, messages, pinnedMessageId, rules, preferences, hydrated]);
-  useEffect(() => { if (hydrated) localStorage.setItem("messmate-accounts", JSON.stringify(accounts)); }, [accounts, hydrated]);
+  useEffect(() => {
+    if (!hydrated || !cloudEnabled || !supabase || !account?.memberId) return;
+    const state: StoredState = { expenses, requests, bills, members, mealLogs, messages, pinnedMessageId, rules, preferences };
+    setCloudSyncing(true);
+    supabase.from("mess_app_state").upsert({ mess_id: messId, state, updated_by: account.memberId }).then(({ error }) => {
+      if (error) setCloudError(`Cloud save failed: ${error.message}`);
+      setCloudSyncing(false);
+    });
+  }, [expenses, requests, bills, members, mealLogs, messages, pinnedMessageId, rules, preferences, hydrated, account?.memberId]);
+  useEffect(() => { if (hydrated && !cloudEnabled) localStorage.setItem("messmate-accounts", JSON.stringify(accounts)); }, [accounts, hydrated]);
   const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 3200); };
   const totalCommodity = expenses.reduce((sum, e) => sum + e.amount, 0);
   const displayMembers = members.map(member => ({ ...member, role: isFixedAdminMember(member) ? "Admin" : "Member", meals: Object.entries(mealLogs).filter(([key]) => key.startsWith(selectedMonth) && key.endsWith(`:${member.id}`)).reduce((sum, [, count]) => sum + count, 0) }));
@@ -96,6 +129,19 @@ export default function HomePage() {
   const submitAuth = (event: React.FormEvent) => {
     event.preventDefault(); setAuthError("");
     const username = authForm.username.trim();
+    if (cloudEnabled && supabase) {
+      const email = username;
+      const request = authMode === "login"
+        ? supabase.auth.signInWithPassword({ email, password: authForm.password })
+        : supabase.auth.signUp({ email, password: authForm.password, options: { data: { name: authForm.name, member_id: authForm.memberId } } });
+      request.then(({ data, error }) => {
+        if (error) { setAuthError(error.message); return; }
+        if (!data.user) { setAuthError("Check your email to confirm the account, then sign in."); return; }
+        setAccount({ name: data.user.user_metadata?.name || email.split("@")[0], username: email, password: "", memberId: data.user.id, role: "member", rent: 0 });
+        setHydrated(true);
+      }).catch(error => setAuthError(error instanceof Error ? error.message : "Authentication failed."));
+      return;
+    }
     const fixedAdmin = username === "Akaba" ? { name: "Akaba", password: "akaba" } : username === "Shahariyar" ? { name: "Shahariyar", password: "shahariyar@37" } : null;
     if (!username || !authForm.password) { setAuthError("Enter a username and password."); return; }
     if (authMode === "login") {
@@ -164,9 +210,9 @@ export default function HomePage() {
     if (!trimmed) return;
     setMessages(current => [...current, { id: `${Date.now()}`, author: account?.name || "Member", body: trimmed, createdAt: new Date().toISOString() }]);
   };
-  const signOut = () => { setAccount(null); localStorage.removeItem("messmate-session"); };
+  const signOut = () => { setAccount(null); if (cloudEnabled && supabase) supabase.auth.signOut(); else localStorage.removeItem("messmate-session"); };
   const nav = (next: Tab) => { if (next === "Meals") setSelectedMonth(currentMonth); setTab(next); setMobileNav(false); };
-  if (!account) return <AuthScreen mode={authMode} setMode={setAuthMode} form={authForm} setForm={setAuthForm} error={authError} onSubmit={submitAuth} />;
+  if (!account) return <AuthScreen mode={authMode} setMode={setAuthMode} form={authForm} setForm={setAuthForm} error={authError} onSubmit={submitAuth} cloudMode={cloudEnabled} />;
   return <div className="min-h-screen bg-cream">
     <aside className={`fixed z-30 flex h-screen w-[248px] flex-col border-r border-line bg-white px-5 py-6 transition-transform md:translate-x-0 ${mobileNav ? "translate-x-0" : "-translate-x-full"}`}>
       <div className="flex items-center gap-2 px-2"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-moss text-white"><Utensils size={19} /></div><span className="font-display text-xl font-bold tracking-tight">messmate<span className="text-terracotta">.</span></span></div>
@@ -178,6 +224,8 @@ export default function HomePage() {
     {mobileNav && <div className="fixed inset-0 z-20 bg-black/20 md:hidden" onClick={() => setMobileNav(false)} />}
     <main className="md:ml-[248px]"><header className="flex h-[76px] items-center justify-between border-b border-line bg-white px-5 sm:px-10"><div className="flex items-center gap-3"><button className="md:hidden" onClick={() => setMobileNav(true)}><Menu size={21} /></button><div><p className="text-[11px] font-bold uppercase tracking-[.18em] text-gray-400">Welcome, {account.name}</p><h1 className="font-display text-lg font-bold text-ink sm:text-xl">Riverside House <ChevronDown className="ml-1 inline-block text-gray-400" size={16} /></h1></div></div><div className="flex items-center gap-4"><button className="relative text-gray-400" onClick={() => flash("No new notifications")}><Bell size={19} /><span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-terracotta" /></button><div className="flex items-center gap-2"><div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#d7e7d9] text-xs font-bold text-moss">{account.name.slice(0, 2).toUpperCase()}</div><span className="hidden text-sm font-semibold sm:block">{account.name} · {account.role}</span><button onClick={signOut} className="rounded-lg border border-line px-2 py-1 text-xs font-bold text-gray-500">Sign out</button></div></div></header>
       <div className="mx-auto max-w-[1400px] p-5 sm:p-10"><div className="mb-8 flex flex-wrap items-end justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-xs font-semibold text-gray-400"><span className="rounded bg-[#eaf3ec] px-2 py-1 text-moss">ACTIVE MONTH</span><span>{selectedMonth}</span></div><h2 className="font-display text-3xl font-bold tracking-tight sm:text-4xl">{tab === "Overview" ? "Your month at a glance." : tab}</h2><p className="mt-2 text-sm text-gray-500">{tab === "Admin close" ? "Review requests, enter shared costs, and finalize an auditable monthly bill." : "Transparent household accounting for every member."}</p></div><div className="flex gap-2">{tab === "Expenses" && <button onClick={() => setShowExpense(true)} className="flex items-center gap-2 rounded-xl bg-moss px-4 py-2.5 text-sm font-bold text-white"><Plus size={17} /> Add commodity</button>}<button onClick={() => flash("Report export is available after a monthly close")} className="flex items-center gap-2 rounded-xl border border-line bg-white px-4 py-2.5 text-sm font-bold text-gray-600"><Download size={16} /> <span className="hidden sm:inline">Export</span></button></div></div>
+        {cloudError && <div className="mb-5 flex items-center justify-between rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"><span>{cloudError}</span><button onClick={() => setCloudError("")}><X size={15} /></button></div>}
+        {cloudEnabled && <div className="mb-5 rounded-xl border border-[#b8d4bc] bg-[#edf7ef] px-4 py-3 text-xs font-semibold text-moss">{cloudSyncing ? "Syncing with Supabase…" : "Connected to shared Supabase data"}</div>}
         {notice && <div className="mb-5 flex items-center justify-between rounded-xl border border-[#b8d4bc] bg-[#edf7ef] px-4 py-3 text-sm font-semibold text-moss"><span className="flex items-center gap-2"><Check size={16} /> {notice}</span><button onClick={() => setNotice("")}><X size={15} /></button></div>}
         {tab === "Overview" && <Overview totalCommodity={totalCommodity} totalMeals={totalMeals} mealRate={mealRate} sharedTotal={sharedTotal} flash={flash} />}
         {tab === "Meals" && <Meals members={members} mealLogs={mealLogs} selectedMonth={selectedMonth || currentMonth} setSelectedMonth={setSelectedMonth} updateMeal={updateMeal} isAdmin={account.role === "admin"} currentMonth={currentMonth} />}
@@ -194,8 +242,8 @@ export default function HomePage() {
   </div>;
 }
 
-function AuthScreen({ mode, setMode, form, setForm, error, onSubmit }: { mode: "login" | "register"; setMode: (mode: "login" | "register") => void; form: { name: string; username: string; password: string; memberId: string; rent: string }; setForm: (form: { name: string; username: string; password: string; memberId: string; rent: string }) => void; error: string; onSubmit: (event: React.FormEvent) => void }) {
-  return <main className="flex min-h-screen items-center justify-center bg-cream p-5"><div className="w-full max-w-md rounded-3xl border border-line bg-white p-7 shadow-sm sm:p-9"><div className="mb-8 flex items-center gap-2"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-moss text-white"><Utensils size={20} /></div><span className="font-display text-2xl font-bold">messmate<span className="text-terracotta">.</span></span></div><h1 className="font-display text-3xl font-bold">{mode === "login" ? "Welcome back." : "Create a member account."}</h1><p className="mt-2 text-sm text-gray-500">{mode === "login" ? "Sign in with your username and password." : "Members are created with zero rent; an admin sets rent later."}</p><form onSubmit={onSubmit} className="mt-7 space-y-4">{mode === "register" && <><Field label="Full name" value={form.name} onChange={value => setForm({ ...form, name: value })} placeholder="Your name" /><Field label="Member ID" value={form.memberId} onChange={value => setForm({ ...form, memberId: value })} placeholder="MEM-01" /></>}<Field label="Username" value={form.username} onChange={value => setForm({ ...form, username: value })} placeholder="Username" /><Field label="Password" value={form.password} onChange={value => setForm({ ...form, password: value })} placeholder="Password" type="password" />{error && <p className="rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>}<button className="w-full rounded-xl bg-moss py-3 text-sm font-bold text-white">{mode === "login" ? "Sign in" : "Register"}</button></form><button onClick={() => setMode(mode === "login" ? "register" : "login")} className="mt-5 w-full text-sm font-semibold text-moss">{mode === "login" ? "Need an account? Register" : "Already registered? Sign in"}</button><p className="mt-6 text-center text-[11px] leading-relaxed text-gray-400">Demo/local credentials: Akaba / akaba and Shahariyar / shahariyar@37. Replace these fixed credentials with Supabase Auth before public deployment.</p></div></main>;
+function AuthScreen({ mode, setMode, form, setForm, error, onSubmit, cloudMode }: { mode: "login" | "register"; setMode: (mode: "login" | "register") => void; form: { name: string; username: string; password: string; memberId: string; rent: string }; setForm: (form: { name: string; username: string; password: string; memberId: string; rent: string }) => void; error: string; onSubmit: (event: React.FormEvent) => void; cloudMode: boolean }) {
+  return <main className="flex min-h-screen items-center justify-center bg-cream p-5"><div className="w-full max-w-md rounded-3xl border border-line bg-white p-7 shadow-sm sm:p-9"><div className="mb-8 flex items-center gap-2"><div className="flex h-10 w-10 items-center justify-center rounded-xl bg-moss text-white"><Utensils size={20} /></div><span className="font-display text-2xl font-bold">messmate<span className="text-terracotta">.</span></span></div><h1 className="font-display text-3xl font-bold">{mode === "login" ? "Welcome back." : "Create a member account."}</h1><p className="mt-2 text-sm text-gray-500">{cloudMode ? "Shared mode uses Supabase Auth. Enter an email address and password." : mode === "login" ? "Sign in with your username and password." : "Members are created with zero rent; an admin sets rent later."}</p><form onSubmit={onSubmit} className="mt-7 space-y-4">{mode === "register" && <><Field label="Full name" value={form.name} onChange={value => setForm({ ...form, name: value })} placeholder="Your name" /><Field label="Member ID" value={form.memberId} onChange={value => setForm({ ...form, memberId: value })} placeholder="MEM-01" /></>}<Field label={cloudMode ? "Email" : "Username"} value={form.username} onChange={value => setForm({ ...form, username: value })} placeholder={cloudMode ? "you@example.com" : "Username"} type={cloudMode ? "email" : "text"} /><Field label="Password" value={form.password} onChange={value => setForm({ ...form, password: value })} placeholder="Password" type="password" />{error && <p className="rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-600">{error}</p>}<button className="w-full rounded-xl bg-moss py-3 text-sm font-bold text-white">{mode === "login" ? "Sign in" : "Register"}</button></form><button onClick={() => setMode(mode === "login" ? "register" : "login")} className="mt-5 w-full text-sm font-semibold text-moss">{mode === "login" ? "Need an account? Register" : "Already registered? Sign in"}</button>{!cloudMode && <p className="mt-6 text-center text-[11px] leading-relaxed text-gray-400">Demo/local credentials: Akaba / akaba and Shahariyar / shahariyar@37. Replace these fixed credentials with Supabase Auth before public deployment.</p>}</div></main>;
 }
 
 function Community({ messages, pinnedMessageId, setPinnedMessageId, rules, setRules, addMessage, isAdmin }: { messages: ChatMessage[]; pinnedMessageId: string | null; setPinnedMessageId: (id: string | null) => void; rules: string[]; setRules: React.Dispatch<React.SetStateAction<string[]>>; addMessage: (body: string) => void; isAdmin: boolean }) {

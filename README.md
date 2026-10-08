@@ -13,14 +13,17 @@ npm run dev
 
 Open http://localhost:3000. The app starts with zero members, expenses, meals, bills, and balances. Local login uses the two fixed demo admins `Akaba` / `akaba` and `Shahariyar` / `shahariyar@37`. Admins register normal member accounts and set their room rents; members cannot edit rent. Local mode persists accounts, member records, daily meal logs, settings, community messages/rules, bills, requests, and the all-time commodity ledger in browser `localStorage`.
 
-## Supabase setup
+## Supabase shared mode
 
-1. Create a Supabase project.
-2. Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-3. Run `supabase/schema.sql` in the Supabase SQL editor.
-4. Add production RLS policies for your membership model before enabling real writes. The schema separates messes, members, meals, expenses, and immutable monthly snapshots and is designed for Supabase Auth user IDs.
+1. Create a Supabase project and enable **Email** under Authentication → Providers.
+2. Run `supabase/schema.sql` in the SQL Editor. It creates the normalized business tables plus `mess_app_state`, the shared application-state row used by this MVP.
+3. Create one row in `messes`, copy its UUID, and set `NEXT_PUBLIC_MESS_ID` to that UUID.
+4. Copy `.env.example` to `.env.local` and set `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `NEXT_PUBLIC_MESS_ID`. Only the URL, anon key, and mess UUID are browser-safe; never add a service-role key.
+5. Register users from the shared login screen. An administrator must then insert/update their `mess_members` row with the matching `auth.users.id`, the chosen mess UUID, `role = 'admin'`, and a member code. Add normal members the same way with `role = 'member'`. This bootstrap step is intentionally manual so no service-role credential is exposed in the browser.
 
-If Supabase variables are not configured, local browser mode is used so the complete workflow remains runnable. Local mode is suitable for evaluation or a single browser only; it is not a secure multi-device authentication system. For production, enable Supabase Auth and replace the local persistence calls with Supabase queries using the provided RLS schema.
+When all three public variables are configured, the app uses Supabase Auth and loads/saves shared state through the RLS-protected `mess_app_state` row, so signed-in users on different devices see the same members, meals, expenses, bills, requests, notices, rules, preferences, and close data. The UI shows cloud loading, connection, and save errors. The existing normalized tables remain available for a future row-by-row migration and are protected by membership/admin policies in the schema.
+
+If Supabase variables are not configured, local browser mode remains available for evaluation. Local mode uses the fixed demo admins `Akaba` / `akaba` and `Shahariyar` / `shahariyar@37`, but is not shared or secure and must not be used for public deployment.
 
 ## Build and deploy
 
@@ -29,7 +32,7 @@ npm run build
 npm run start
 ```
 
-Deploy on Vercel by importing the repository and adding the two `NEXT_PUBLIC_SUPABASE_*` environment variables. No secrets are committed to this repository.
+Deploy on Vercel by importing the repository and adding all three variables (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_MESS_ID`) for Preview and Production, then redeploy. Configure the Supabase Auth site URL and redirect URLs to the Vercel domain. No secrets are committed to this repository.
 
 ## Included workflows
 
