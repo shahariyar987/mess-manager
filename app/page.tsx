@@ -23,6 +23,8 @@ const chartData = Array.from({ length: 7 }, (_, i) => ({ day: (i * 5) + 1, spend
 const emptyBills: BillState = { maid: 0, electricity: 0, wifi: 0, gas: 0 };
 const emptyState: StoredState = { expenses: [], requests: [], bills: emptyBills, members: [], mealLogs: {}, messages: [], pinnedMessageId: null, rules: [], preferences: { currency: "BDT", notifications: true, compact: false } };
 const getCurrentMonth = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`; };
+const fixedAdminIds = new Set(["ADMIN-AKABA", "ADMIN-SHAHARIYAR"]);
+const isFixedAdminMember = (member: Member) => fixedAdminIds.has(member.id);
 
 export default function HomePage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -62,7 +64,7 @@ export default function HomePage() {
       const savedAccounts = localStorage.getItem("messmate-accounts");
       if (saved) {
         const parsed = JSON.parse(saved) as StoredState;
-        setExpenses(parsed.expenses || []); setRequests(parsed.requests || []); setBills(parsed.bills || emptyBills); setMembers(parsed.members || []); setMealLogs(parsed.mealLogs || {}); setMessages(parsed.messages || []); setPinnedMessageId(parsed.pinnedMessageId || null); setRules(parsed.rules || []); setPreferences(parsed.preferences || emptyState.preferences);
+        setExpenses(parsed.expenses || []); setRequests(parsed.requests || []); setBills(parsed.bills || emptyBills); setMembers((parsed.members || []).map(member => ({ ...member, role: isFixedAdminMember(member) ? "Admin" : "Member" }))); setMealLogs(parsed.mealLogs || {}); setMessages(parsed.messages || []); setPinnedMessageId(parsed.pinnedMessageId || null); setRules(parsed.rules || []); setPreferences(parsed.preferences || emptyState.preferences);
       }
       if (savedAccounts) setAccounts(JSON.parse(savedAccounts) as Account[]);
       const session = localStorage.getItem("messmate-session");
@@ -76,7 +78,7 @@ export default function HomePage() {
   useEffect(() => { if (hydrated) localStorage.setItem("messmate-accounts", JSON.stringify(accounts)); }, [accounts, hydrated]);
   const flash = (message: string) => { setNotice(message); window.setTimeout(() => setNotice(""), 3200); };
   const totalCommodity = expenses.reduce((sum, e) => sum + e.amount, 0);
-  const displayMembers = members.map(member => ({ ...member, meals: Object.entries(mealLogs).filter(([key]) => key.startsWith(selectedMonth) && key.endsWith(`:${member.id}`)).reduce((sum, [, count]) => sum + count, 0) }));
+  const displayMembers = members.map(member => ({ ...member, role: isFixedAdminMember(member) ? "Admin" : "Member", meals: Object.entries(mealLogs).filter(([key]) => key.startsWith(selectedMonth) && key.endsWith(`:${member.id}`)).reduce((sum, [, count]) => sum + count, 0) }));
   const totalMeals = displayMembers.reduce((sum, member) => sum + member.meals, 0);
   const sharedTotal = Object.values(bills).reduce((sum, value) => sum + value, 0);
   const mealRate = totalMeals ? totalCommodity / totalMeals : 0;
@@ -102,7 +104,7 @@ export default function HomePage() {
         : accounts.find(item => item.username && item.username.toLowerCase() === username.toLowerCase() && item.password === authForm.password);
       if (!found) { setAuthError("No matching local account. Register first or check your credentials."); return; }
       setAccount(found); localStorage.setItem("messmate-session", JSON.stringify(found));
-      if (!members.some(member => member.id === found.memberId)) setMembers([...members, { name: found.name, id: found.memberId, initials: found.name.slice(0, 2).toUpperCase(), role: "Admin", meals: 0, rent: 0, color: "bg-[#e1efe4] text-[#35624a]" }]);
+      if (!members.some(member => member.id === found.memberId)) setMembers([...members, { name: found.name, id: found.memberId, initials: found.name.slice(0, 2).toUpperCase(), role: found.role === "admin" ? "Admin" : "Member", meals: 0, rent: found.rent, color: "bg-[#e1efe4] text-[#35624a]" }]);
       return;
     }
     if (!authForm.name.trim() || !authForm.memberId.trim()) { setAuthError("Name and member ID are required."); return; }
@@ -138,7 +140,7 @@ export default function HomePage() {
   const deleteMember = () => {
     if (!account || account.role !== "admin") { flash("Only admins can delete members."); return; }
     if (!deleteCandidate) { flash("Select a member to delete."); return; }
-    if (deleteCandidate.role === "Admin" || deleteCandidate.id === account.memberId) { flash("Fixed and current admin accounts cannot be deleted."); return; }
+    if (isFixedAdminMember(deleteCandidate) || deleteCandidate.id === account.memberId) { flash("Fixed and current admin accounts cannot be deleted."); return; }
     const memberId = deleteCandidate.id;
     const deletedName = deleteCandidate.name;
     setMembers(current => current.filter(member => member.id !== memberId));
